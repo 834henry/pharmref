@@ -373,8 +373,82 @@ function hl(text,q){
 
 let showing=60;
 
+// Iterative Levenshtein distance (typo tolerance)
+function levenshtein(a,b){
+  if(a===b)return 0;
+  const al=a.length, bl=b.length;
+  if(al===0)return bl;
+  if(bl===0)return al;
+  let prev=new Array(bl+1);
+  for(let j=0;j<=bl;j++)prev[j]=j;
+  for(let i=1;i<=al;i++){
+    let cur=[i];
+    for(let j=1;j<=bl;j++){
+      const cost=a[i-1]===b[j-1]?0:1;
+      cur[j]=Math.min(prev[j]+1,cur[j-1]+1,prev[j-1]+cost);
+    }
+    prev=cur;
+  }
+  return prev[bl];
+}
+
+function fuzzyThreshold(len){
+  if(len<=3)return 0;
+  if(len<=5)return 1;
+  if(len<=8)return 2;
+  return 3;
+}
+
+// Lowest edit distance between the query and any word in a string
+function bestWordDistance(text,q){
+  const words=text.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+  let best=Infinity;
+  for(const w of words){
+    if(Math.abs(w.length-q.length)>fuzzyThreshold(q.length)+2)continue;
+    const d=levenshtein(w,q);
+    if(d<best)best=d;
+  }
+  return best;
+}
+
+// Relevance score: exact/prefix/substring name match ranks highest,
+// then brand names, then fuzzy (typo-tolerant) name/brand matches,
+// then category, then a broad low-priority search of all other fields.
+function scoreDrug(d,q){
+  if(!q)return 1;
+  const nameLower=d.name.toLowerCase();
+  const brandLower=d.brandNames.toLowerCase();
+  let score=0;
+
+  if(nameLower===q)return 10000;
+  if(nameLower.startsWith(q))score=Math.max(score,3000);
+  else if(nameLower.includes(q))score=Math.max(score,1800);
+
+  if(brandLower.includes(q))score=Math.max(score,1200);
+
+  const nameThresh=fuzzyThreshold(q.length);
+  const nameDist=bestWordDistance(d.name,q);
+  if(nameDist<=nameThresh)score=Math.max(score,900-nameDist*150);
+
+  const brandDist=bestWordDistance(d.brandNames,q);
+  if(brandDist<=nameThresh)score=Math.max(score,600-brandDist*120);
+
+  if(score>0)return score;
+
+  if(d.category.toLowerCase().includes(q))score=Math.max(score,300);
+  if(d.subcategory.toLowerCase().includes(q))score=Math.max(score,250);
+  if(score>0)return score;
+
+  const fields=[d.indications,d.mechanism,d.dosage,d.sideEffects,d.adverseEffects,d.drugInteractions,d.contraindications,d.counselling,d.foodInteractions];
+  for(const f of fields){
+    if(f.toLowerCase().includes(q)){score=100;break}
+  }
+  return score;
+}
+
 function render(){
-  const q=(document.getElementById('q').value||'').toLowerCase().trim();
+  const qRaw=(document.getElementById('q').value||'').trim();
+  const q=qRaw.toLowerCase();
   const cat=document.getElementById('cat').value;
   const ct=document.getElementById('ct');
   const list=document.getElementById('list');
@@ -385,19 +459,13 @@ function render(){
 
   let f=D;
   if(cat)f=f.filter(d=>d.category===cat);
-  if(q)f=f.filter(d=>
-    d.name.toLowerCase().includes(q)||
-    d.category.toLowerCase().includes(q)||
-    d.subcategory.toLowerCase().includes(q)||
-    d.indications.toLowerCase().includes(q)||
-    d.mechanism.toLowerCase().includes(q)||
-    d.dosage.toLowerCase().includes(q)||
-    d.sideEffects.toLowerCase().includes(q)||
-    d.adverseEffects.toLowerCase().includes(q)||
-    d.drugInteractions.toLowerCase().includes(q)||
-    d.contraindications.toLowerCase().includes(q)||
-    d.brandNames.toLowerCase().includes(q)
-  );
+
+  if(q){
+    f=f.map(d=>({d,score:scoreDrug(d,q)}))
+       .filter(x=>x.score>0)
+       .sort((a,b)=>b.score-a.score)
+       .map(x=>x.d);
+  }
 
   ct.textContent=f.length+' of '+D.length+' drugs';
 
